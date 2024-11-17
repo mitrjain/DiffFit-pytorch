@@ -63,6 +63,8 @@ from difffit_pytorch.utils import (
     load_unet_for_difffit,
 )
 
+from datasets import load_dataset
+
 if is_wandb_available():
     import wandb
 
@@ -169,12 +171,22 @@ def parse_args(input_args=None):
         help="Pretrained tokenizer name or path if not the same as model_name",
     )
     parser.add_argument(
-        "--instance_data_dir",
+        "--dataset_name",
         type=str,
         default=None,
         required=True,
-        help="A folder containing the training data of instance images.",
+        help=(
+            "The name of the Dataset (from the HuggingFace hub) to train on (could be your own, possibly private,"
+            " dataset)."
+        ),
     )
+    # parser.add_argument(
+    #     "--instance_data_dir",
+    #     type=str,
+    #     default=None,
+    #     required=True,
+    #     help="A folder containing the training data of instance images.",
+    # )
     parser.add_argument(
         "--class_data_dir",
         type=str,
@@ -182,13 +194,13 @@ def parse_args(input_args=None):
         required=False,
         help="A folder containing the training data of class images.",
     )
-    parser.add_argument(
-        "--instance_prompt",
-        type=str,
-        default=None,
-        required=True,
-        help="The prompt with identifier specifying the instance",
-    )
+    # parser.add_argument(
+    #     "--instance_prompt",
+    #     type=str,
+    #     default=None,
+    #     required=True,
+    #     help="The prompt with identifier specifying the instance",
+    # )
     parser.add_argument(
         "--class_prompt",
         type=str,
@@ -487,8 +499,7 @@ def parse_args(input_args=None):
 
     return args
 
-
-class DreamBoothDataset(Dataset):
+class BitFitDataset(Dataset):
     """
     A dataset to prepare the instance and class images with the prompts for fine-tuning the model.
     It pre-processes the images and the tokenizes prompts.
@@ -496,8 +507,7 @@ class DreamBoothDataset(Dataset):
 
     def __init__(
         self,
-        instance_data_root,
-        instance_prompt,
+        hugging_face_dataset,
         tokenizer,
         class_data_root=None,
         class_prompt=None,
@@ -509,13 +519,11 @@ class DreamBoothDataset(Dataset):
         self.center_crop = center_crop
         self.tokenizer = tokenizer
 
-        self.instance_data_root = Path(instance_data_root)
-        if not self.instance_data_root.exists():
-            raise ValueError(f"Instance {self.instance_data_root} images root doesn't exists.")
+        self.dataset = load_dataset(hugging_face_dataset, split="train")
+        self.images = self.dataset['image']
+        self.prompts = self.dataset['text']
 
-        self.instance_images_path = list(Path(instance_data_root).iterdir())
-        self.num_instance_images = len(self.instance_images_path)
-        self.instance_prompt = instance_prompt
+        self.num_instance_images = len(self.images)
         self._length = self.num_instance_images
 
         if class_data_root is not None:
@@ -545,12 +553,13 @@ class DreamBoothDataset(Dataset):
 
     def __getitem__(self, index):
         example = {}
-        instance_image = Image.open(self.instance_images_path[index % self.num_instance_images])
+        instance_image = self.images[index % self.num_instance_images]
+        instance_prompt = self.prompts[index % self.num_instance_images]
         if not instance_image.mode == "RGB":
             instance_image = instance_image.convert("RGB")
         example["instance_images"] = self.image_transforms(instance_image)
         example["instance_prompt_ids"] = self.tokenizer(
-            self.instance_prompt,
+            instance_prompt,
             truncation=True,
             padding="max_length",
             max_length=self.tokenizer.model_max_length,
@@ -571,7 +580,6 @@ class DreamBoothDataset(Dataset):
             ).input_ids
 
         return example
-
 
 def collate_fn(examples, with_prior_preservation=False):
     input_ids = [example["instance_prompt_ids"] for example in examples]
@@ -829,9 +837,8 @@ def main(args):
     )
 
     # Dataset and DataLoaders creation:
-    train_dataset = DreamBoothDataset(
-        instance_data_root=args.instance_data_dir,
-        instance_prompt=args.instance_prompt,
+    train_dataset = BitFitDataset(
+        hugging_face_dataset=args.dataset_name,
         class_data_root=args.class_data_dir if args.with_prior_preservation else None,
         class_prompt=args.class_prompt,
         class_num=args.num_class_images,
@@ -1068,7 +1075,7 @@ def main(args):
         save_model_card(
             repo_id,
             base_model=args.pretrained_model_name_or_path,
-            prompt=args.instance_prompt,
+            prompt=args.validation_prompt,
             repo_folder=args.output_dir,
         )
         upload_folder(
